@@ -124,6 +124,7 @@ class Model:
         self.metrics = list(map(get_metric, metrics))
         self.metrics_names = [metric.__name__ for metric in self.metrics]
         self.device = None
+        self.model_wrapper = model
 
     def fit(self, x, y, validation_x=None, validation_y=None, batch_size=32, epochs=1000, steps_per_epoch=None, validation_steps=None, initial_epoch=1, verbose=True, callbacks=[]):
         """
@@ -304,11 +305,11 @@ class Model:
             metrics_sum = np.zeros(len(self.metrics))
             sizes_sum = 0.
 
-            self.model.train(True)
+            self.model_wrapper.train(True)
             with torch.enable_grad():
                 for step, (x, y) in self._get_step_iterator(steps_per_epoch, train_generator):
                     callback_list.on_batch_begin(step, {})
-                    self.model.zero_grad()
+                    self.model_wrapper.zero_grad()
 
                     loss_tensor, metrics, _ = self._compute_loss_and_metrics(x, y, return_loss_tensor=True)
 
@@ -328,7 +329,7 @@ class Model:
 
             val_dict = {}
             if valid_generator is not None:
-                self.model.eval()
+                self.model_wrapper.eval()
                 val_loss, val_metrics, _ = self._validate(valid_generator, validation_steps)
                 val_metrics_dict = {'val_' + metric_name:metric for metric_name, metric in zip(self.metrics_names, val_metrics)}
                 val_dict = {'val_loss': val_loss, **val_metrics_dict}
@@ -382,11 +383,11 @@ class Model:
             ``pred_y`` is the predictions with tensors converted into Numpy
             arrays.
         """
-        self.model.train(True)
+        self.model_wrapper.train(True)
         with torch.enable_grad():
             self._transfer_optimizer_state_to_right_device()
 
-            self.model.zero_grad()
+            self.model_wrapper.zero_grad()
 
             loss_tensor, metrics, pred_y = self._compute_loss_and_metrics(x, y, return_loss_tensor=True, return_pred=return_pred)
 
@@ -439,14 +440,14 @@ class Model:
             List of the predictions of each batch with tensors converted into
             Numpy arrays.
         """
-        self.model.eval()
+        self.model_wrapper.eval()
         if steps is None and hasattr(generator, '__len__'):
             steps = len(generator)
         pred_y = []
         with torch.no_grad():
             for _, x in self._get_step_iterator(steps, generator):
                 x = self._process_input(x)
-                pred_y.append(torch_to_numpy(self.model(x)))
+                pred_y.append(torch_to_numpy(self.model_wrapper(x)))
         return pred_y
 
     def predict_on_batch(self, x):
@@ -460,10 +461,10 @@ class Model:
         Returns:
             The predictions with tensors converted into Numpy arrays.
         """
-        self.model.eval()
+        self.model_wrapper.eval()
         with torch.no_grad():
             x = self._process_input(x)
-            return torch_to_numpy(self.model(x))
+            return torch_to_numpy(self.model_wrapper(x))
 
     def evaluate(self, x, y, batch_size=32, return_pred=False):
         """
@@ -564,7 +565,7 @@ class Model:
                 model = Model(pytorch_module, optimizer, loss_function, metrics=[my_metric1_fn, my_metric2_fn])
                 loss, (my_metric1, my_metric2), pred_y = model.evaluate_generator(test_generator, return_pred=True)
         """
-        self.model.eval()
+        self.model_wrapper.eval()
         if steps is None:
             steps = len(generator)
         loss, metrics, pred_y = self._validate(generator, steps, return_pred=return_pred)
@@ -594,7 +595,7 @@ class Model:
             ``pred_y`` is the predictions with tensors converted into Numpy
             arrays.
         """
-        self.model.eval()
+        self.model_wrapper.eval()
         with torch.no_grad():
             loss, metrics, pred_y = self._compute_loss_and_metrics(x, y, return_pred=return_pred)
         return self._format_return(loss, metrics, pred_y, return_pred)
@@ -624,7 +625,7 @@ class Model:
 
     def _compute_loss_and_metrics(self, x, y, return_loss_tensor=False, return_pred=False):
         x, y = self._process_input(x, y)
-        pred_y = self.model(x)
+        pred_y = self.model_wrapper(x)
         loss = self.loss_function(pred_y, y)
         if not return_loss_tensor:
             loss = float(loss)
@@ -775,14 +776,25 @@ class Model:
         """
         Tranfers the network on the specified device. The device is saved so
         that the batches can send to the right device before passing it to the
-        network.
+        network. If ``device`` is a list or a tuple, then a
+        ``torch.nn.DataParallel`` is instanciated with ``device`` as
+        ``device_ids`` and the network is sent on GPU ``device[0]``.
 
         Args:
-            device (torch.device): The device to which the network is sent.
+            device (Union[torch.device, tuple, list]): The device to which the
+                network is sent or the list of devices for
+                ``torch.nn.DataParallel``.
 
         Returns:
             `self`.
         """
+        if isinstance(device, tuple) or isinstance(device, list):
+            self.model_wrapper = torch.nn.DataParallel(self.model_wrapper,
+                                                       device_ids=device,
+                                                       output_device=device[0],
+                                                       dim=0)
+            device = torch.device('cuda:%d' % device[0])
+
         self.device = device
         self.model.to(self.device)
         return self
